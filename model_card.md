@@ -31,6 +31,65 @@ Given a pet and a free-text question, `retrieve_notes()` tokenizes the question 
   - Full test suite (`python3 -m pytest`): 20/20 passed, run with no `GEMINI_API_KEY` set.
   - Live evaluation (`eval_pawpal_rag.py --live`, real Gemini): 3/3 cases passed; both supported cases returned a correctly-cited, on-topic answer, and the bicycle case made 0 model calls exactly as in offline mode.
 
+## Few-Shot Specialization Experiment
+
+A separate script, `fewshot_experiment.py`, compares the production zero-shot prompt (`pawpal_rag.build_prompt()`, unchanged — the app and `ask()` still use it) against a few-shot variant (`build_prompt_few_shot()`, defined only in that script) that adds two worked examples before the real notes/question: one supported answer that cites a note (`grooming-dog-1`), and one insufficient-evidence answer where a retrieved note is topically related but doesn't answer the question (`grooming-cat-1`). Both variants are otherwise byte-identical (same instructions, same notes block, same question, same closing instruction), and both are sent through the same `GeminiClient` (same model, same settings) for each held-out question, so the examples are the only variable.
+
+**Held-out test set** (4 questions, using only `walk-dog-1`, `feeding-dog-1`, `feeding-cat-1`, `medication-any-1` — disjoint from the two notes used in the few-shot examples above):
+
+| Case | Question | Retrieved notes | Kind |
+|---|---|---|---|
+| dog supported | "Is 45 minutes of daily walking reasonable for my adult dog?" | `walk-dog-1`, `feeding-dog-1` | supported |
+| cat supported | "How many meals should I plan for my cat's daily feeding schedule?" | `feeding-cat-1` | supported |
+| dog insufficient | "What brand of dog food should I buy for my adult dog?" | `walk-dog-1`, `feeding-dog-1` | insufficient — neither note names a brand |
+| cat insufficient | "Is it safe to give my cat human ibuprofen for pain relief?" | `medication-any-1` | insufficient — note doesn't cover this |
+
+Scoring: a "supported" case passes if the answer cites any of the notes actually supplied to it (`[note-id]` substring match); an "insufficient" case passes if the answer abstains with exactly `NO_EVIDENCE_MESSAGE`, as both prompts instruct.
+
+**Actual output, 2026-11-15 (`GEMINI_API_KEY=... python3 fewshot_experiment.py`, `gemini-3.5-flash-lite`):**
+
+```
+=== dog supported (supported) ===
+  retrieved notes: ['walk-dog-1', 'feeding-dog-1']
+  [zero-shot] PASS: Yes, 45 minutes of daily walking is reasonable, as adult dogs generally
+    need 20-60 minutes of walking a day, split across 1-3 walks, though high-energy breeds
+    may need more [walk-dog-1].
+  [few-shot]  PASS: Answer: Yes, 45 minutes of daily walking is reasonable, as adult dogs
+    generally need 20 to 60 minutes of walking a day, which can be split across 1 to 3
+    walks [walk-dog-1].
+
+=== cat supported (supported) ===
+  retrieved notes: ['feeding-cat-1']
+  [zero-shot] PASS: For Luna's daily feeding schedule, you can plan for small, frequent
+    meals, with a common approach being free-feeding dry food plus 1-2 scheduled wet
+    meals a day [feeding-cat-1].
+  [few-shot]  PASS: Answer: A common daily feeding schedule for cats includes small,
+    frequent meals, such as free-feeding dry food combined with 1 to 2 scheduled wet
+    meals a day [feeding-cat-1].
+
+=== dog insufficient (notes retrieved, don't answer) (insufficient) ===
+  retrieved notes: ['walk-dog-1', 'feeding-dog-1']
+  [zero-shot] PASS: I don't have local pet-care notes that cover this question, so I
+    can't answer it from PawPal's notes. Please ask a vet or pet-care professional, or
+    rephrase with a pet-care topic.
+  [few-shot]  PASS: (identical message)
+
+=== cat insufficient (notes retrieved, don't answer) (insufficient) ===
+  retrieved notes: ['medication-any-1']
+  [zero-shot] PASS: (no-evidence message)
+  [few-shot]  PASS: (identical message)
+
+Zero-shot score: 4/4
+Few-shot score:  4/4
+Result: tie — few-shot did not measurably improve scores on this held-out set.
+```
+
+(Full exact answer text for all 4 cases, both variants, is in the raw run output; the two insufficient-evidence cases are abbreviated above only because zero-shot and few-shot produced the identical, exact `NO_EVIDENCE_MESSAGE` string.)
+
+**Manual citation check:** for both supported cases, the cited note (`walk-dog-1`, `feeding-cat-1`) genuinely supports the claim made — the dog answer's "20-60 minutes... split across 1-3 walks" and the cat answer's "free-feeding dry food plus 1-2 scheduled wet meals a day" are both taken directly from the cited note's text, not fabricated or drawn from the uncited `feeding-dog-1` note that was also retrieved alongside `walk-dog-1`.
+
+**Result: tie, 4/4 vs. 4/4.** The zero-shot prompt was already fully correct on this held-out set — both the citation behavior and the insufficient-evidence abstention. The few-shot examples changed surface wording slightly (an added "Answer:" prefix, minor phrasing differences) but did not change correctness on any case, and the two insufficient-evidence cases were byte-identical between variants. **Recommendation: do not adopt the few-shot variant.** It adds prompt length and latency/token cost for a model (`gemini-3.5-flash-lite`) that is already behaving correctly zero-shot on this test set; there's no measured benefit to justify the cost. This result is specific to this model, this prompt, and this small held-out set — a smaller or different model might benefit from the same examples, but that would need its own test, not an assumption.
+
 ## AI collaboration reflection
 
 Claude Code was used throughout this feature: designing the retrieval/prompt/client split in `pawpal_rag.py`, diagnosing the bicycle-tire regression, writing the fix, and building `eval_pawpal_rag.py`.
