@@ -2,6 +2,7 @@ from datetime import date, time
 
 import streamlit as st
 
+from pawpal_rag import GeminiClient, ask, retrieve_notes
 from pawpal_system import Owner, Pet, Priority, Schedule, Task, TaskCategory
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
@@ -75,6 +76,33 @@ if not owner.pets:
 pet_names = [p.name for p in owner.pets]
 selected_pet_name = st.selectbox("Select pet", pet_names, index=len(pet_names) - 1)
 pet = next(p for p in owner.pets if p.name == selected_pet_name)
+
+st.divider()
+
+st.subheader("Ask PawPal")
+st.caption(f"Ask a care question about {pet.name}. Answers cite the local care notes they're based on.")
+
+question = st.text_input("Your question", key="ask_pawpal_question")
+if st.button("Ask"):
+    if not question.strip():
+        st.warning("Enter a question first.")
+    elif not retrieve_notes(pet, question):
+        # No local evidence for this question: skip Gemini entirely, so this path
+        # works even without a GEMINI_API_KEY configured.
+        st.session_state[f"ask_pawpal_answer_{pet.name}"] = ask(pet, question, None)
+    else:
+        try:
+            client = GeminiClient()
+        except RuntimeError as error:
+            st.error(str(error))
+        else:
+            with st.spinner("Asking PawPal..."):
+                answer = ask(pet, question, client)
+            st.session_state[f"ask_pawpal_answer_{pet.name}"] = answer
+
+stored_answer = st.session_state.get(f"ask_pawpal_answer_{pet.name}")
+if stored_answer:
+    st.markdown(stored_answer)
 
 st.divider()
 
