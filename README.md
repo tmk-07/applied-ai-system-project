@@ -123,6 +123,98 @@ tests/test_pawpal.py::test_filter_tasks_by_completion_status PASSED      [100%]
 | Conflict handling | `Owner.detect_conflicts()` | Groups pending tasks across all of an owner's pets by exact `preferred_time` and returns a list of warning strings for any time with more than one task — same pet or different pets. Lightweight exact-match check, not full interval overlap (see `reflection.md`, section 2b). |
 | Recurring tasks | `Task.create_next_occurrence()`, `Pet.complete_task()` | `Pet.complete_task(task_id)` marks a task done and, if it's recurring (`recurrence="daily"` or `"weekly"`), automatically creates and adds the next occurrence with its `due_date` advanced by `timedelta(days=1)` or `timedelta(weeks=1)`. |
 
+## 🐾 Ask PawPal (RAG + Gemini)
+
+Ask PawPal is a stretch feature built on top of the **Module 2 PawPal+ baseline** described above (the `Owner`/`Pet`/`Task`/`Schedule` classes in `pawpal_system.py`, unchanged by this feature). It answers a pet-care question about the selected pet by retrieving from a small, local, static corpus of care notes (`CARE_NOTES` in `pawpal_rag.py`) and passing only the matched notes to Gemini as evidence. If retrieval finds nothing relevant, the app shows a fixed no-evidence message and **never calls Gemini** — this is enforced in code, not just in the prompt (see the diagram below).
+
+### Setup
+
+```bash
+pip install -r requirements.txt          # includes google-genai
+export GEMINI_API_KEY=your-key-here      # only needed for live Gemini calls
+```
+
+`GEMINI_MODEL` is an optional env var to override the default model (`gemini-3.5-flash-lite`).
+
+### Run commands
+
+```bash
+streamlit run app.py                         # interactive UI, "Ask PawPal" section
+python3 -m pytest                            # unit tests (never needs an API key)
+python3 eval_pawpal_rag.py                   # offline eval, fake client, no network/key needed
+GEMINI_API_KEY=your-key-here python3 eval_pawpal_rag.py --live   # live eval, real Gemini calls
+```
+
+### How retrieval works
+
+`retrieve_notes()` tokenizes the question and each care note, strips common stopwords ("a", "to", "my", "how", ...), and only keeps a note if it shares at least one real content word with the question. A pet's task categories (e.g. a dog with a "walk" task) can add a small bonus that **reorders** already-relevant notes, but a category match alone can never pull in an unrelated note — this was a real bug, fixed on 2026-11-15 (see `model_card.md` and the "bicycle tire" example below).
+
+### Three real examples
+
+Each example shows the pet, the exact question, which local notes were retrieved, and the outcome. The two supported cases were run twice: once offline against `eval_pawpal_rag.py`'s fake client (labeled **offline/fake**), and once with `--live` against real Gemini (labeled **live/Gemini**) so the actual citation could be checked.
+
+**1. Dog, supported — offline/fake** (`python3 eval_pawpal_rag.py`)
+```
+species:        dog
+question:       How many minutes a day should my adult dog walk?
+retrieved notes: ['walk-dog-1', 'feeding-dog-1', 'medication-any-1']
+outcome:        sent 3 note(s) to client, got fake reply
+```
+
+**1. Dog, supported — live/Gemini** (`GEMINI_API_KEY=... python3 eval_pawpal_rag.py --live`)
+```
+species:        dog
+question:       How many minutes a day should my adult dog walk?
+retrieved notes: ['walk-dog-1', 'feeding-dog-1', 'medication-any-1']
+outcome:        Adult dogs generally need 20-60 minutes of walking a day, split across
+                 1-3 walks, though high-energy breeds may need more [walk-dog-1].
+```
+Note that `feeding-dog-1` and `medication-any-1` were retrieved alongside the correct note (they share the content word "day" with the question) but Gemini correctly cited only the relevant one, `walk-dog-1`.
+
+**2. Cat, supported — offline/fake**
+```
+species:        cat
+question:       How many meals a day should I feed my cat?
+retrieved notes: ['feeding-cat-1', 'walk-cat-1', 'medication-any-1']
+outcome:        sent 3 note(s) to client, got fake reply
+```
+
+**2. Cat, supported — live/Gemini**
+```
+species:        cat
+question:       How many meals a day should I feed my cat?
+retrieved notes: ['feeding-cat-1', 'walk-cat-1', 'medication-any-1']
+outcome:        Cats often prefer small, frequent meals, with a common approach being
+                 free-feeding dry food combined with 1-2 scheduled wet meals a day
+                 [feeding-cat-1].
+```
+Again, `walk-cat-1` and `medication-any-1` were retrieved (sharing "day") but correctly left uncited.
+
+**3. Bicycle tire, no evidence — offline/fake and live/Gemini give the identical result**, because the no-evidence path never calls the model in either mode:
+```
+species:        dog
+question:       How do I change a bicycle tire?
+retrieved notes: []
+outcome:        no-evidence message, 0 model calls
+```
+This is the regression case: a dog with a "walk" task used to get `walk-dog-1` retrieved anyway (via stopword overlap on "a"/"to", not the category bonus), and Gemini would then answer the literal bicycle question using its own general knowledge instead of refusing. See `model_card.md` for the root cause and fix.
+
+### Offline evaluation results (observed)
+
+```
+3/3 cases passed.
+```
+
+### Test results (observed)
+
+```
+============================== 20 passed in 0.02s ==============================
+```
+
+### Architecture diagram
+
+[`diagrams/ask_pawpal_flow.mmd`](diagrams/ask_pawpal_flow.mmd) shows the retrieval → no-evidence branch → generation flow, including that the no-evidence branch happens *before* any Gemini call, not as a prompt-only instruction. It also shows where `eval_pawpal_rag.py`'s automated checks validate each branch (offline fake-client assertions and the live-mode call-count assertion), and where human review fits: a person reads the Streamlit answer or the `--live` output, checks that `[note-id]` citations are correct and that irrelevant retrieved notes weren't cited, and records the resulting accept/revise/reject decision in `model_card.md`.
+
 ## 📸 Demo Walkthrough
 
 ### Streamlit app (`app.py`)

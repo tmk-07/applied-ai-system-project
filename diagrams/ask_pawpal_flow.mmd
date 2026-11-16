@@ -1,0 +1,42 @@
+flowchart TD
+    subgraph RUNTIME["Runtime: Streamlit app.py"]
+        A["Owner asks a question about a pet\n(app.py: 'Ask' button)"] --> B["retrieve_notes(pet, question)\n(pawpal_rag.py, local only)"]
+        B --> C["Tokenize question and each CARE_NOTES entry\nstrip stopwords (a, to, my, how, ...)"]
+        C --> D["Filter to pet.species, require\nreal content-word overlap > 0"]
+        D --> E["Task-category bonus reorders\nalready-relevant notes (cannot add new ones)"]
+        E --> F{"Any notes retrieved?"}
+
+        F -- "No" --> G["ask() returns NO_EVIDENCE_MESSAGE\ndirectly in code (Python guardrail,\nnot a prompt instruction)"]
+        G --> H["0 Gemini calls\nNo GEMINI_API_KEY required"]
+
+        F -- "Yes" --> I["build_prompt(pet, question, notes)\nnotes only, cite note ids, refuse if insufficient"]
+        I --> J["GeminiClient.generate(prompt)\n(real network call)"]
+        J --> K["Answer with [note-id] citations\nshown in Streamlit"]
+    end
+
+    subgraph EVAL["Automated evaluation: eval_pawpal_rag.py"]
+        L["Offline mode (default)\nFakeGeminiClient, no network/key"] --> M["Assert: supported questions retrieve\nspecies-matched notes AND client.call_count == 1"]
+        L --> N["Assert: bicycle question retrieves []\nAND client.call_count == 0"]
+        O["Live mode (--live)\nreal GeminiClient for supported cases"] --> P["Prints actual Gemini answers\nfor citation checking"]
+        O --> Q["Bicycle case still asserts\nclient.call_count == 0 (no key needed)"]
+    end
+
+    M -. "validates" .-> D
+    N -. "validates" .-> G
+    P -. "validates" .-> J
+    Q -. "validates" .-> G
+
+    subgraph HUMAN["Human review"]
+        R["Owner/developer reads Streamlit answer\nand/or eval --live output"]
+        R --> S["Checks [note-id] citations are correct,\nand that irrelevant retrieved notes\n(e.g. feeding-dog-1) were NOT cited"]
+        S --> T["Decision recorded in model_card.md:\naccept, revise, or reject the behavior"]
+    end
+
+    K --> R
+    P --> R
+
+    style G fill:#f8d7da,stroke:#842029
+    style H fill:#f8d7da,stroke:#842029
+    style J fill:#d1e7dd,stroke:#0f5132
+    style R fill:#fff3cd,stroke:#997404
+    style T fill:#fff3cd,stroke:#997404
