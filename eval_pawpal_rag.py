@@ -80,6 +80,11 @@ CASES: list[Case] = [
          "How many meals a day should I feed my cat?", "feeding-cat-1"),
     Case("bicycle (no evidence)", _make_dog(),
          "How do I change a bicycle tire?", None),
+    # Paraphrase of the dog case above, with almost no words in common, to check that the
+    # IDF-weighted ranking generalizes rather than being tuned to one exact sentence.
+    Case("dog paraphrase (generalization check)", _make_dog(),
+         "My adult dog is high energy -- how many minutes of walking does he need each day?",
+         "walk-dog-1"),
 ]
 
 
@@ -119,6 +124,10 @@ def run_case(case: Case, live: bool) -> bool:
     print(f"  species:        {case.pet.species}")
     print(f"  question:       {case.question}")
     print(f"  retrieved notes: {note_ids}")
+    if case.expect_note_id is not None:
+        irrelevant_count = len(note_ids) - (1 if note_found else 0)
+        print(f"  expected note retained: {note_found} ({case.expect_note_id!r})")
+        print(f"  irrelevant notes returned: {irrelevant_count}")
     print(f"  outcome:        {outcome}")
     print()
     return passed

@@ -6,6 +6,7 @@ Gemini, so tests can inject a fake client and stay API-key-free.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -75,29 +76,55 @@ CARE_NOTES: list[CareNote] = [
               "than a scheduling question."),
 ]
 
+# Document frequency of each content word across the whole corpus, computed once at import
+# time. A word that shows up in most/all notes (e.g. "day") is a weak relevance signal; a
+# word specific to one or two notes is a strong one. This drives the IDF weighting below.
+_DOCUMENT_FREQUENCY: dict[str, int] = {}
+for _note in CARE_NOTES:
+    for _word in _content_words(_note.text):
+        _DOCUMENT_FREQUENCY[_word] = _DOCUMENT_FREQUENCY.get(_word, 0) + 1
+del _note, _word
+
+# Smaller than the weakest real single-word match (the most common content word, "day",
+# scores ln(9/5) ≈ 0.59), so this can only reorder notes that already cleared the relevance
+# gate on keyword weight alone — never admit a note by itself.
+_CATEGORY_BONUS = 0.2
+
+
+def _idf(word: str) -> float:
+    """Inverse document frequency: down-weights words that occur across many notes."""
+    df = _DOCUMENT_FREQUENCY.get(word, 0)
+    if df == 0:
+        return 0.0
+    return math.log(len(CARE_NOTES) / df)
+
 
 def retrieve_notes(pet: Pet, question: str, limit: int = 3) -> list[CareNote]:
     """Return the most relevant local care notes for this pet and question.
 
     A note is only a candidate if it shares real content words with the question
     (stopwords like "a"/"to"/"my" don't count, so two unrelated sentences sharing
-    filler words can't match). The pet's task-category bonus only reorders notes
-    that already cleared that bar — it cannot make an unrelated note relevant.
+    filler words can't match). Matched words are weighted by inverse document
+    frequency, so a word that appears in most notes (e.g. "day") contributes far
+    less than one specific to a note or two, which keeps a handful of notes
+    sharing only common words from outranking (or crowding out) the true match.
+    The pet's task-category bonus only reorders notes that already cleared that
+    bar — it cannot make an unrelated note relevant.
     """
     question_words = _content_words(question)
     task_categories = {task.category.name.lower() for task in pet.tasks}
 
-    scored: list[tuple[int, CareNote]] = []
+    scored: list[tuple[float, CareNote]] = []
     for note in CARE_NOTES:
         if note.species not in ("any", pet.species.lower()):
             continue
         note_words = _content_words(note.text)
-        keyword_score = len(question_words & note_words) * 2
-        if keyword_score == 0:
+        overlap = question_words & note_words
+        score = sum(_idf(word) for word in overlap)
+        if score <= 0:
             continue
-        score = keyword_score
         if note.category in task_categories:
-            score += 1
+            score += _CATEGORY_BONUS
         scored.append((score, note))
 
     scored.sort(key=lambda pair: pair[0], reverse=True)

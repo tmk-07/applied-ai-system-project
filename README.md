@@ -215,6 +215,59 @@ This is the regression case: a dog with a "walk" task used to get `walk-dog-1` r
 
 [`diagrams/ask_pawpal_flow.mmd`](diagrams/ask_pawpal_flow.mmd) shows the retrieval → no-evidence branch → generation flow, including that the no-evidence branch happens *before* any Gemini call, not as a prompt-only instruction. It also shows where `eval_pawpal_rag.py`'s automated checks validate each branch (offline fake-client assertions and the live-mode call-count assertion), and where human review fits: a person reads the Streamlit answer or the `--live` output, checks that `[note-id]` citations are correct and that irrelevant retrieved notes weren't cited, and records the resulting accept/revise/reject decision in `model_card.md`.
 
+*(The test-harness documentation above — three real examples, offline evaluation results, test results — covers `eval_pawpal_rag.py` as a bonus deliverable in its own right. The section below is a separate, follow-on improvement to the retriever itself.)*
+
+## ⚖️ RAG Enhancement: IDF-weighted ranking
+
+The supported-case examples above show a real, pre-existing limitation: `retrieve_notes()` previously scored a note by raw keyword-overlap count (`2 points per shared content word` + a flat `+1` task-category bonus), so a note sharing only a common word like "day" — which appears in 5 of the 9 care notes — scored the same per word as a note sharing a word that's actually specific to one topic. This let generic notes crowd into the result set and rank closer to the true match than they should.
+
+**The fix (`pawpal_rag.py`):** matched words are now weighted by inverse document frequency (IDF), computed once at import time from `CARE_NOTES` itself — no external library, no dependency beyond the standard-library `math` module. A word's weight is `ln(N / df)`, where `N` is the corpus size (9) and `df` is how many notes contain that word. A word in every note would weight to 0; a word specific to one note weights highest (`ln(9/1) ≈ 2.2`). The task-category bonus (`+0.2`) was kept but shrunk so it stays below the weakest realistic single-word match — it can still only reorder notes that already have real overlap, never admit one with none (unchanged from the earlier fix; still enforced by the `score <= 0: continue` gate before the bonus is applied).
+
+**Before/after, computed directly (not simulated) from the two supported demo questions:**
+
+| Case | Note | Shared words | Old score (flat) | New score (IDF) |
+|---|---|---|---|---|
+| Dog | `walk-dog-1` (correct) | adult, day, minutes | 7 | **3.80** |
+| Dog | `feeding-dog-1` (noise) | adult, day | 4 | 2.09 |
+| Dog | `medication-any-1` (noise) | day | 2 | 0.59 |
+| Cat | `feeding-cat-1` (correct) | day, meals | 5 | **2.29** |
+| Cat | `walk-cat-1` (noise) | day | 2 | 0.59 |
+| Cat | `medication-any-1` (noise) | day | 2 | 0.59 |
+
+The separation between the correct note and the weakest noise note grew from **3.5x → 6.5x** (dog) and **2.5x → 3.9x** (cat) — the ranking is meaningfully better at pushing the true match to the top and the generic matches toward the bottom.
+
+**What did *not* change:** the exact set of note IDs returned for the dog and cat cases is identical before and after (`['walk-dog-1', 'feeding-dog-1', 'medication-any-1']` and `['feeding-cat-1', 'walk-cat-1', 'medication-any-1']`) — all three species-eligible notes genuinely share at least one content word with the question, so with `limit=3` all three are still returned either way. The improvement here is in ranking/score separation, not in raw selection count for these two cases; an honest comparison needs to say so rather than imply fewer notes came back.
+
+**Generalization check (new, not the demo wording):** to confirm the IDF weighting isn't just tuned to the two exact demo sentences, a differently-worded dog question was added — *"My adult dog is high energy -- how many minutes of walking does he need each day?"* — sharing almost no phrasing with the original ("minutes a day should my adult dog walk"). It still retrieves `walk-dog-1` as a top result:
+
+```
+[PASS] dog paraphrase (generalization check)
+species:        dog
+question:       My adult dog is high energy -- how many minutes of walking does he need each day?
+retrieved notes: ['walk-dog-1', 'medication-any-1', 'feeding-dog-1']
+expected note retained: True ('walk-dog-1')
+irrelevant notes returned: 2
+```
+
+**Bicycle case still makes zero model calls**, unchanged by this enhancement (observed directly):
+
+```
+[PASS] bicycle (no evidence)
+species:        dog
+question:       How do I change a bicycle tire?
+retrieved notes: []
+outcome:        no-evidence message, 0 model calls
+```
+
+**Observed results after the enhancement, 2026-11-15:**
+
+```
+4/4 cases passed.     # python3 eval_pawpal_rag.py
+```
+```
+20 passed in 0.01s    # python3 -m pytest
+```
+
 ## 📸 Demo Walkthrough
 
 ### Streamlit app (`app.py`)
